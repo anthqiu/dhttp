@@ -174,10 +174,12 @@ def send_segmented_request(http_request_bytes, server_ip, server_port=UDP_PORT, 
     segments = split_encoded(encoded, max_label=50)
     total_segments = len(segments)
     record_id = uuid.uuid4().hex
+    print("Generated record ID:", record_id)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5)
     for seg_index, chunk in enumerate(segments):
         qname = f"n.{record_id}.{seg_index}.{total_segments}.{chunk}.{domain}"
+        print(f"Sending segment {seg_index + 1}/{total_segments}: {qname}")
         dns_req = DNSRecord.question(qname)
         try:
             sock.sendto(dns_req.pack(), (server_ip, server_port))
@@ -187,6 +189,7 @@ def send_segmented_request(http_request_bytes, server_ip, server_port=UDP_PORT, 
             print(f"Segment {seg_index} ACK timed out")
     print(f"All {total_segments} request segments sent, Record ID={record_id}")
     trigger_qname = f"s.{record_id}.{domain}"
+    print(f"Sending trigger query: {trigger_qname}")
     dns_req = DNSRecord.question(trigger_qname)
     full_encoded_response = ""
     try:
@@ -217,6 +220,7 @@ def send_segmented_request(http_request_bytes, server_ip, server_port=UDP_PORT, 
         print(f"Received response segment {seg + 1}/{total_resp}, Record ID={response_record_id}")
         for seg_index in range(1, total_resp):
             retrieval_qname = f"r.{response_record_id}.{seg_index}.{domain}"
+            print(f"Sending retrieval query {seg_index+1}/{total_resp}: {retrieval_qname}")
             dns_req = DNSRecord.question(retrieval_qname)
             sock.sendto(dns_req.pack(), (server_ip, server_port))
             data, _ = sock.recvfrom(4096)
