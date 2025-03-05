@@ -240,8 +240,11 @@ def send_segmented_request(http_request_bytes, server_ip, server_port=UDP_PORT, 
             full_encoded_response += meta.get('D', '')
             print(f"Received response segment {seg_index + 1}/{total_resp}")
         full_response_bytes = base64.b32decode(full_encoded_response.encode('ascii'))
-        print("Complete HTTP response (bytes):")
-        print(full_response_bytes)
+        print("Complete HTTP response:")
+        try:
+            print(full_response_bytes.decode('utf-8'))
+        except UnicodeDecodeError:
+            print(full_response_bytes)
         return full_response_bytes
     except socket.timeout:
         print("Trigger query or response retrieval timed out")
