@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 """
 server.py
 ---------
 DNS Tunnel server code, handling client requests and forwarding HTTP requests.
+All HTTP requests/responses are handled as byte arrays; only headers are parsed.
 """
 
 import socket
@@ -12,21 +14,22 @@ import time
 from dnslib import DNSRecord, QTYPE, RR, TXT
 from utils import UDP_PORT, FIXED_DOMAIN, split_txt, split_encoded, extract_encoded_request, format_txt_response, forward_http_request
 
-# Used to store HTTP response segmentation records: record_id -> (list of chunks, creation time)
+# Store HTTP response segments: record_id -> (list of Base32-encoded chunks, creation time)
 records = {}
 records_lock = threading.Lock()
 
-# Used to store client segmented request data: record_id -> {"total": int, "received": {seg_index: data}, "timestamp": float}
+# Store client segmented request data: record_id -> {"total": int, "received": {seg_index: data}, "timestamp": float}
 incoming_requests = {}
 incoming_requests_lock = threading.Lock()
 
-RECORD_EXPIRE = 300  # Record validity period (seconds); automatic cleanup is not implemented in this example
+RECORD_EXPIRE = 300  # Record validity period (seconds); cleanup not implemented in this example
 
 def process_request_segment(dns_record, addr, sock):
     """
     Process a single segment in a client's segmented request.
     Format: n.<record_id>.<seg_index>.<total_segments>.<data_chunk>.<fixed_domain>
-    Save this segment into incoming_requests and reply with an ACK.
+    The data_chunk is part of the Base32-encoded HTTP request (as str).
+    Save it into incoming_requests and reply with an ACK.
     """
     qname = str(dns_record.q.qname)
     if qname.endswith('.'):
@@ -40,15 +43,15 @@ def process_request_segment(dns_record, addr, sock):
         seg_index = int(labels[2])
         total_segments = int(labels[3])
     except Exception as e:
-        print("Error parsing segment index/total segments in segmented request:", e)
+        print("Error parsing segment index/total segments:", e)
         return
-    data_chunk = labels[4]  # Use the 5th label as the data chunk
+    data_chunk = labels[4]
     with incoming_requests_lock:
         if record_id not in incoming_requests:
             incoming_requests[record_id] = {"total": total_segments, "received": {}, "timestamp": time.time()}
         entry = incoming_requests[record_id]
         if entry["total"] != total_segments:
-            print("Total segments received do not match the existing record:", qname)
+            print("Total segments mismatch in record:", qname)
             return
         entry["received"][seg_index] = data_chunk
     ack_txt = f"ACK:{record_id}:{seg_index}"
@@ -60,7 +63,7 @@ def process_request_segment(dns_record, addr, sock):
 def process_request_trigger(dns_record, addr, sock):
     """
     Process a client trigger query, format: s.<record_id>.<fixed_domain>
-    Check if all segments have been received, assemble the complete request,
+    Check if all segments are received, assemble the complete request,
     forward it, and return the first response segment.
     """
     qname = str(dns_record.q.qname)
@@ -87,17 +90,19 @@ def process_request_trigger(dns_record, addr, sock):
             return
         segments = [entry["received"][i] for i in sorted(entry["received"].keys())]
         full_encoded = "".join(segments)
-        missing_padding = len(full_encoded) % 8
-        if missing_padding:
-            full_encoded += '=' * (8 - missing_padding)
-        try:
-            http_request = base64.b32decode(full_encoded.encode('utf-8')).decode('utf-8')
-        except Exception as e:
-            http_request = f"Decoding failed: {e}"
-    print(f"Assembled complete request record {record_id}, HTTP request:\n{http_request}")
-    response_text = forward_http_request(http_request)
-    print(f"HTTP response after forwarding request:\n{response_text}")
-    chunks = split_txt(response_text, max_length=200)
+    missing_padding = len(full_encoded) % 8
+    if missing_padding:
+        full_encoded += '=' * (8 - missing_padding)
+    try:
+        http_request_bytes = base64.b32decode(full_encoded.encode('ascii'))
+    except Exception as e:
+        http_request_bytes = f"Decoding failed: {e}".encode('ascii')
+    print(f"Assembled request record {record_id}, header:\n{http_request_bytes.partition(b'\r\n\r\n')[0]!r}")
+    response_bytes = forward_http_request(http_request_bytes)
+    print(f"Forwarded HTTP response, header:\n{response_bytes.partition(b'\r\n\r\n')[0]!r}")
+    # Base32-encode the complete HTTP response bytes
+    encoded_response = base64.b32encode(response_bytes).decode('ascii')
+    chunks = split_txt(encoded_response, max_length=200)
     total_segments = len(chunks)
     response_record_id = uuid.uuid4().hex
     with records_lock:
@@ -110,6 +115,7 @@ def process_request_trigger(dns_record, addr, sock):
 def process_new_request(dns_record, addr, sock):
     """
     Process a non-segmented new request (when the request is short and directly encoded in the query name).
+    The request is expected to be a Base32-encoded HTTP request (as bytes).
     """
     qname = str(dns_record.q.qname)
     if qname.endswith('.'):
@@ -122,13 +128,14 @@ def process_new_request(dns_record, addr, sock):
         missing_padding = len(encoded_request) % 8
         if missing_padding:
             encoded_request += '=' * (8 - missing_padding)
-        http_request = base64.b32decode(encoded_request.encode('utf-8')).decode('utf-8')
+        http_request_bytes = base64.b32decode(encoded_request.encode('ascii'))
     except Exception as e:
-        http_request = f"Decoding failed: {e}"
-    print(f"Received HTTP request from {addr}:\n{http_request}")
-    response_text = forward_http_request(http_request)
-    print(f"HTTP response after forwarding request:\n{response_text}")
-    chunks = split_txt(response_text, max_length=200)
+        http_request_bytes = f"Decoding failed: {e}".encode('ascii')
+    print(f"Received HTTP request from {addr}, header:\n{http_request_bytes.partition(b'\r\n\r\n')[0]!r}")
+    response_bytes = forward_http_request(http_request_bytes)
+    print(f"Forwarded HTTP response, header:\n{response_bytes.partition(b'\r\n\r\n')[0]!r}")
+    encoded_response = base64.b32encode(response_bytes).decode('ascii')
+    chunks = split_txt(encoded_response, max_length=200)
     total_segments = len(chunks)
     response_record_id = uuid.uuid4().hex
     with records_lock:
